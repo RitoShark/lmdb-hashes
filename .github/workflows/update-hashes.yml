@@ -38,70 +38,50 @@ jobs:
         run: |
           if [ -f output/lol-hashes-combined.zst ]; then
             echo "has_output=true" >> $GITHUB_OUTPUT
-            echo "combined_size=$(stat -c%s output/lol-hashes-combined.zst)" >> $GITHUB_OUTPUT
-            echo "wad_size=$(stat -c%s output/lol-hashes-wad.zst)" >> $GITHUB_OUTPUT
-            echo "bin_size=$(stat -c%s output/lol-hashes-bin.zst)" >> $GITHUB_OUTPUT
             echo "fingerprint=$(cat output/fingerprint.sha256)" >> $GITHUB_OUTPUT
           else
             echo "has_output=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Check if release already exists for this fingerprint
+      - name: Check if hashes changed
         if: steps.check.outputs.has_output == 'true'
-        id: existing
+        id: changed
         run: |
-          FP="${{ steps.check.outputs.fingerprint }}"
-          SHORT="${FP:0:12}"
-          TAG="v${SHORT}"
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
+          if [ -f dist/fingerprint.sha256 ]; then
+            OLD=$(cat dist/fingerprint.sha256)
+            NEW="${{ steps.check.outputs.fingerprint }}"
+            if [ "$OLD" = "$NEW" ]; then
+              echo "changed=false" >> $GITHUB_OUTPUT
+            else
+              echo "changed=true" >> $GITHUB_OUTPUT
+            fi
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "changed=true" >> $GITHUB_OUTPUT
           fi
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create GitHub Release
-        if: steps.check.outputs.has_output == 'true' && steps.existing.outputs.exists == 'false'
+      - name: Commit updated hashes to repo
+        if: steps.check.outputs.has_output == 'true' && steps.changed.outputs.changed == 'true'
         run: |
-          TAG="${{ steps.existing.outputs.tag }}"
-          COMBINED_MB=$(echo "scale=1; ${{ steps.check.outputs.combined_size }} / 1048576" | bc)
-          WAD_MB=$(echo "scale=1; ${{ steps.check.outputs.wad_size }} / 1048576" | bc)
-          BIN_MB=$(echo "scale=1; ${{ steps.check.outputs.bin_size }} / 1048576" | bc)
+          mkdir -p dist
+          cp output/lol-hashes-combined.zst dist/
+          cp output/lol-hashes-wad.zst dist/
+          cp output/lol-hashes-bin.zst dist/
+          cp output/fingerprint.sha256 dist/
 
-          gh release create "$TAG" \
-            output/lol-hashes-combined.zst \
-            output/lol-hashes-wad.zst \
-            output/lol-hashes-bin.zst \
-            --title "Hash DB ${TAG}" \
-            --notes "Auto-generated LMDB hash databases from CommunityDragon.
-
-          **3 variants:**
-          - \`lol-hashes-combined.zst\` — WAD + BIN hashes (${COMBINED_MB} MB)
-          - \`lol-hashes-wad.zst\` — WAD hashes only (${WAD_MB} MB)
-          - \`lol-hashes-bin.zst\` — BIN hashes only (${BIN_MB} MB)
-
-          **Key formats:**
-          - WAD: u64 xxhash64 (big-endian) → path string
-          - BIN: u32 FNV1a (big-endian) → name string
-
-          Fingerprint: ${{ steps.check.outputs.fingerprint }}
-          Source: https://github.com/CommunityDragon/Data/tree/master/hashes/lol" \
-            --latest
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add dist/
+          git commit -m "update hash databases"
+          git push
 
       - name: Summary
         if: always()
         run: |
-          if [ "${{ steps.existing.outputs.exists }}" = "true" ]; then
+          if [ "${{ steps.changed.outputs.changed }}" = "false" ]; then
             echo "### Skipped — hashes unchanged" >> $GITHUB_STEP_SUMMARY
           elif [ "${{ steps.check.outputs.has_output }}" = "true" ]; then
-            echo "### Published new release: ${{ steps.existing.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
-            echo "- Combined: ${{ steps.check.outputs.combined_size }} bytes" >> $GITHUB_STEP_SUMMARY
-            echo "- WAD-only: ${{ steps.check.outputs.wad_size }} bytes" >> $GITHUB_STEP_SUMMARY
-            echo "- BIN-only: ${{ steps.check.outputs.bin_size }} bytes" >> $GITHUB_STEP_SUMMARY
+            echo "### Committed updated hash databases" >> $GITHUB_STEP_SUMMARY
+            ls -lh dist/*.zst | awk '{print "- " $9 ": " $5}' >> $GITHUB_STEP_SUMMARY
           else
             echo "### No output produced" >> $GITHUB_STEP_SUMMARY
           fi
