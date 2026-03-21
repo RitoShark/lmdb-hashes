@@ -61,6 +61,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Delete old releases
+        if: steps.check.outputs.has_output == 'true' && steps.existing.outputs.exists == 'false'
+        run: |
+          TAG="${{ steps.existing.outputs.tag }}"
+          for old_tag in $(gh release list --limit 50 --json tagName -q '.[].tagName'); do
+            if [ "$old_tag" != "$TAG" ]; then
+              echo "Deleting old release: $old_tag"
+              gh release delete "$old_tag" --yes --cleanup-tag
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Create GitHub Release
         if: steps.check.outputs.has_output == 'true' && steps.existing.outputs.exists == 'false'
         run: |
