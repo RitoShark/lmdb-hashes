@@ -8,10 +8,8 @@ use std::path::{Path, PathBuf};
 const CDRAGON_BASE: &str =
     "https://raw.githubusercontent.com/CommunityDragon/Data/master/hashes/lol/";
 
-const GAME_HASH_PARTS: &[&str] = &[
-    "https://raw.githubusercontent.com/CommunityDragon/Data/master/hashes/lol/hashes.game.txt.0",
-    "https://raw.githubusercontent.com/CommunityDragon/Data/master/hashes/lol/hashes.game.txt.1",
-];
+const GAME_HASH_PART_PREFIX: &str =
+    "https://raw.githubusercontent.com/CommunityDragon/Data/master/hashes/lol/hashes.game.txt.";
 
 const BIN_HASH_FILES: &[&str] = &[
     "hashes.binhashes.txt",
@@ -113,11 +111,21 @@ fn download_game_hashes(work_dir: &Path) {
     let output = work_dir.join("hashes.game.txt");
     let mut out_file = fs::File::create(&output).expect("Failed to create hashes.game.txt");
 
-    for (i, url) in GAME_HASH_PARTS.iter().enumerate() {
-        eprint!("  Downloading part {}/{}...", i + 1, GAME_HASH_PARTS.len());
-        let response = reqwest::blocking::get(*url)
+    // Probe sequential parts (.0, .1, .2, …) until a 404. CommunityDragon
+    // splits hashes.game.txt and periodically adds more parts — probing
+    // avoids needing a code change each time.
+    let mut part_index: u32 = 0;
+    loop {
+        let url = format!("{}{}", GAME_HASH_PART_PREFIX, part_index);
+        eprint!("  Downloading part {}...", part_index);
+
+        let response = reqwest::blocking::get(&url)
             .unwrap_or_else(|e| panic!("Failed to download {}: {}", url, e));
 
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            eprintln!(" not found (stopping)");
+            break;
+        }
         if !response.status().is_success() {
             panic!("HTTP {} for {}", response.status(), url);
         }
@@ -125,6 +133,11 @@ fn download_game_hashes(work_dir: &Path) {
         let bytes = response.bytes().expect("Failed to read response body");
         out_file.write_all(&bytes).expect("Failed to write hash data");
         eprintln!(" {:.1} MB", bytes.len() as f64 / 1024.0 / 1024.0);
+        part_index += 1;
+    }
+
+    if part_index == 0 {
+        panic!("No hashes.game.txt parts found at {}0", GAME_HASH_PART_PREFIX);
     }
 }
 
