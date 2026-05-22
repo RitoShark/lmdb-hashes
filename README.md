@@ -17,7 +17,7 @@ Each `.zst` file decompresses to an LMDB `data.mdb` with named databases (`wad`,
 Download the latest release:
 
 ```
-https://github.com/LeagueToolkit/lmdb-hashes/releases/latest/download/lol-hashes-combined.zst
+https://github.com/RitoShark/lmdb-hashes/releases/latest/download/lol-hashes-combined.zst
 ```
 
 Decompress with zstd and open with any LMDB client (e.g. `heed` in Rust):
