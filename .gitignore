@@ -2,3 +2,6 @@
 /output
 /work
 Cargo.lock
+
+# Claude working guide (kept local, not tracked)
+CLAUDE.md
