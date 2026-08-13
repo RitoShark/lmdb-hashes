@@ -1,21 +1,11 @@
 [package]
 name = "lmdb-hash-builder"
-version = "0.2.0"
+version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "lol-hash-cracker"
-path = "src/main.rs"
-
 [dependencies]
-anyhow = "1"
-clap = { version = "4", features = ["derive"] }
 heed = "0.20"
 reqwest = { version = "0.12", features = ["blocking", "stream"] }
-ritoshark = { git = "https://github.com/RitoShark/RitoShark-Crates", rev = "24fe6b3665edbf5b67977918571c8fa6769c74c2", default-features = false, features = ["bin", "wad"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 sha2 = "0.10"
-walkdir = "2"
 zstd = "0.13"
 hex = "0.4"
