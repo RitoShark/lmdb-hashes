@@ -302,14 +302,6 @@ pub fn write_unresolved(path: &Path, report: &ScanReport) -> Result<()> {
         output.push_str(&entry.hash);
         output.push('\n');
     }
-    for entry in report
-        .wad_hashes
-        .iter()
-        .filter(|entry| entry.resolved.is_none())
-    {
-        output.push_str(&entry.hash);
-        output.push('\n');
-    }
     fs::write(path, output)?;
     Ok(())
 }
