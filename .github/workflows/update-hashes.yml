@@ -31,7 +31,7 @@ jobs:
         run: cargo build --release
 
       - name: Run hash-builder
-        run: ./target/release/lmdb-hash-builder output work
+        run: ./target/release/lol-hash-cracker build --output output --work work
 
       - name: Check if output exists
         id: check
