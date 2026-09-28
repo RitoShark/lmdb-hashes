@@ -1,52 +1,55 @@
-use std::io::{self, BufRead, Write};
+use heed::types::{Bytes, Str};
+use heed::{Database, EnvOpenOptions};
+use std::error::Error;
+use std::io::{self, BufRead};
+use std::path::Path;
 
-pub const MAGIC: &str = "RITO-HASHES 2";
+pub const SCHEMA: &str = "lmdb-hashes-separated-v2";
+pub type Entry = (Vec<u8>, String);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub enum Universe {
-    Game,
-    Entries,
-    Hashes,
-    Fields,
-    Types,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Table {
+    Wad,
+    BinEntries,
+    BinHashes,
+    BinFields,
+    BinTypes,
 }
 
-impl Universe {
+impl Table {
     pub const ALL: [Self; 5] = [
-        Self::Game,
-        Self::Entries,
-        Self::Hashes,
-        Self::Fields,
-        Self::Types,
+        Self::Wad,
+        Self::BinEntries,
+        Self::BinHashes,
+        Self::BinFields,
+        Self::BinTypes,
     ];
 
-    pub fn header(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
-            Self::Game => "--GAME--",
-            Self::Entries => "--ENTRIES--",
-            Self::Hashes => "--HASHES--",
-            Self::Fields => "--FIELDS--",
-            Self::Types => "--TYPES--",
+            Self::Wad => "wad",
+            Self::BinEntries => "binentries",
+            Self::BinHashes => "binhashes",
+            Self::BinFields => "binfields",
+            Self::BinTypes => "bintypes",
         }
     }
 
     pub fn source(self) -> &'static str {
         match self {
-            Self::Game => "hashes.game.txt",
-            Self::Entries => "hashes.binentries.txt",
-            Self::Hashes => "hashes.binhashes.txt",
-            Self::Fields => "hashes.binfields.txt",
-            Self::Types => "hashes.bintypes.txt",
+            Self::Wad => "hashes.game.txt",
+            Self::BinEntries => "hashes.binentries.txt",
+            Self::BinHashes => "hashes.binhashes.txt",
+            Self::BinFields => "hashes.binfields.txt",
+            Self::BinTypes => "hashes.bintypes.txt",
         }
     }
 
-    pub fn hash(self, name: &str) -> u64 {
-        let lower = name.to_ascii_lowercase();
-        match self {
-            Self::Game => xxhash_rust::xxh64::xxh64(lower.as_bytes(), 0),
-            _ => lower.bytes().fold(0x811c9dc5u32, |hash, byte| {
-                (hash ^ u32::from(byte)).wrapping_mul(0x01000193)
-            }) as u64,
+    pub fn key_width(self) -> usize {
+        if self == Self::Wad {
+            8
+        } else {
+            4
         }
     }
 }
@@ -55,16 +58,9 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
-fn valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.trim() == name
-        && !name.contains(['\r', '\n', '\0'])
-        && !(name.starts_with("--") && name.ends_with("--"))
-}
-
-pub fn read_source(reader: impl BufRead, universe: Universe) -> io::Result<Vec<String>> {
-    let width = if universe == Universe::Game { 16 } else { 8 };
-    let mut names = Vec::new();
+pub fn read_source(reader: impl BufRead, table: Table) -> io::Result<Vec<Entry>> {
+    let width = table.key_width() * 2;
+    let mut entries = Vec::new();
     for (index, line) in reader.lines().enumerate() {
         let line = line?;
         if line.is_empty() || line.starts_with('#') {
@@ -73,7 +69,7 @@ pub fn read_source(reader: impl BufRead, universe: Universe) -> io::Result<Vec<S
         let fail = || {
             invalid(format!(
                 "{}:{}: invalid hash/name record",
-                universe.source(),
+                table.source(),
                 index + 1
             ))
         };
@@ -84,82 +80,41 @@ pub fn read_source(reader: impl BufRead, universe: Universe) -> io::Result<Vec<S
             return Err(fail());
         }
         let name = line.get(width + 1..).ok_or_else(fail)?;
-        if !valid_name(name) {
-            return Err(fail());
-        }
-        let expected = u64::from_str_radix(hash_text, 16).map_err(|_| fail())?;
-        if universe.hash(name) != expected {
-            return Err(invalid(format!(
-                "{}:{}: hash cannot be reconstructed for {name:?}",
-                universe.source(),
-                index + 1
-            )));
-        }
-        names.push(name.to_owned());
+        let key = hex::decode(hash_text).map_err(|_| fail())?;
+        entries.push((key, name.to_owned()));
     }
-    names.sort_unstable();
-    names.dedup();
-    if names.is_empty() {
-        return Err(invalid(format!("{} contains no names", universe.source())));
+    entries.sort_unstable();
+    entries.dedup();
+    if entries.is_empty() {
+        return Err(invalid(format!("{} contains no records", table.source())));
     }
-    Ok(names)
+    if let Some(pair) = entries.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+        return Err(invalid(format!(
+            "{}: conflicting names for hash {}",
+            table.source(),
+            hex::encode(&pair[0].0)
+        )));
+    }
+    Ok(entries)
 }
 
-pub fn write_tables(mut writer: impl Write, tables: &[(Universe, Vec<String>)]) -> io::Result<()> {
-    if tables.is_empty() {
-        return Err(invalid("at least one section is required"));
-    }
-    writeln!(writer, "{MAGIC}")?;
-    let mut previous = None;
-    for (universe, names) in tables {
-        if previous.is_some_and(|previous| previous >= *universe) {
-            return Err(invalid("sections must be unique and in canonical order"));
-        }
-        previous = Some(*universe);
-        writeln!(writer, "{}", universe.header())?;
-        let mut previous_name: Option<&str> = None;
-        for name in names {
-            if !valid_name(name) || previous_name.is_some_and(|previous| previous >= name.as_str())
-            {
-                return Err(invalid("names must be valid, unique and sorted"));
-            }
-            writeln!(writer, "{name}")?;
-            previous_name = Some(name);
+pub fn build_lmdb(directory: &Path, tables: &[(Table, Vec<Entry>)]) -> Result<(), Box<dyn Error>> {
+    let env = unsafe {
+        EnvOpenOptions::new()
+            .map_size(2 * 1024 * 1024 * 1024)
+            .max_dbs(5)
+            .open(directory)?
+    };
+    let mut txn = env.write_txn()?;
+    for (table, entries) in tables {
+        let db: Database<Bytes, Str> = env.create_database(&mut txn, Some(table.name()))?;
+        for (key, name) in entries {
+            db.put(&mut txn, key, name)?;
         }
     }
-    Ok(())
-}
-
-pub fn visit_names(
-    reader: impl BufRead,
-    mut visit: impl FnMut(Universe, &str) -> io::Result<()>,
-) -> io::Result<()> {
-    let mut lines = reader.lines();
-    if lines.next().transpose()?.as_deref() != Some(MAGIC) {
-        return Err(invalid("unsupported hash table format"));
-    }
-    let mut current = None;
-    let mut previous_name = String::new();
-    for line in lines {
-        let line = line?;
-        if let Some(universe) = Universe::ALL.into_iter().find(|u| u.header() == line) {
-            if current.is_some_and(|previous| previous >= universe) {
-                return Err(invalid("sections must be unique and in canonical order"));
-            }
-            current = Some(universe);
-            previous_name.clear();
-        } else {
-            let universe = current.ok_or_else(|| invalid("name before first section"))?;
-            if !valid_name(&line) || line <= previous_name {
-                return Err(invalid("names must be valid, unique and sorted"));
-            }
-            visit(universe, &line)?;
-            previous_name = line;
-        }
-    }
-    if current.is_none() {
-        return Err(invalid("at least one section is required"));
-    }
+    txn.commit()?;
+    env.force_sync()?;
+    env.prepare_for_closing().wait();
     Ok(())
 }
 
@@ -167,95 +122,54 @@ pub fn visit_names(
 mod tests {
     use super::*;
 
-    fn source(universe: Universe, names: &[&str]) -> String {
-        let width = if universe == Universe::Game { 16 } else { 8 };
-        names
-            .iter()
-            .map(|name| format!("{:0width$x} {name}\n", universe.hash(name)))
-            .collect()
-    }
-
     #[test]
-    fn known_hashes() {
-        assert_eq!(Universe::Types.hash("AIGenericCommon"), 0x4247cbb9);
-        assert_eq!(Universe::Fields.hash("Hello"), 0x4f9f2cab);
-        assert_eq!(Universe::Game.hash(""), 0xef46db3751d8e999);
-        assert_eq!(Universe::Game.hash("Hello"), 0x26c7827d889f6da3);
-    }
-
-    #[test]
-    fn names_only_round_trip_keeps_universes_and_aliases() {
-        let mut tables = Vec::new();
-        for universe in Universe::ALL {
-            let input = source(universe, &["same", "Same", "same", "path with spaces"]);
-            tables.push((universe, read_source(input.as_bytes(), universe).unwrap()));
-        }
-        let mut bytes = Vec::new();
-        write_tables(&mut bytes, &tables).unwrap();
-        assert!(
-            String::from_utf8_lossy(&bytes).contains("--ENTRIES--\nSame\npath with spaces\nsame\n")
-        );
-        let compressed = zstd::encode_all(bytes.as_slice(), 1).unwrap();
-        let decoded = zstd::decode_all(compressed.as_slice()).unwrap();
-        let mut actual = Vec::new();
-        visit_names(decoded.as_slice(), |universe, name| {
-            actual.push((universe, name.to_owned()));
-            Ok(())
-        })
+    fn preserves_supplied_hash_and_name_bytes() {
+        let entries = read_source(
+            b"10e25123126b83b0 assets/perks/styles/style5/futuresmarket/futures.ps4.market.dds\n"
+                .as_slice(),
+            Table::Wad,
+        )
         .unwrap();
-        let expected: Vec<_> = tables
-            .into_iter()
-            .flat_map(|(u, names)| names.into_iter().map(move |n| (u, n)))
-            .collect();
-        assert_eq!(actual, expected);
+        assert_eq!(entries[0].0, 0x10e25123126b83b0u64.to_be_bytes());
+        let entries = read_source(
+            b"811c9dc5 \r\n00000000  padded \r\n".as_slice(),
+            Table::BinHashes,
+        )
+        .unwrap();
+        assert_eq!(entries[0].1, " padded ");
+        assert_eq!(entries[1].1, "");
     }
 
     #[test]
-    fn preserves_distinct_names_with_the_same_hash() {
-        let universe = Universe::Entries;
-        assert_eq!(universe.hash("costarring"), universe.hash("liquid"));
-        let input = source(universe, &["liquid", "costarring", "liquid"]);
+    fn deduplicates_identical_pairs_but_rejects_conflicting_names() {
         assert_eq!(
-            read_source(input.as_bytes(), universe).unwrap(),
-            ["costarring", "liquid"]
+            read_source(
+                b"00000001 Name\n00000001 Name\n".as_slice(),
+                Table::BinTypes
+            )
+            .unwrap()
+            .len(),
+            1
         );
+        assert!(read_source(
+            b"00000001 Name\n00000001 Other\n".as_slice(),
+            Table::BinTypes
+        )
+        .is_err());
     }
 
     #[test]
-    fn rejects_lossy_sources() {
+    fn rejects_malformed_sources() {
         for input in [
-            "00000000 wrong\n",
-            "ééééé bad\n",
-            "12345678\n",
             "",
             "# empty\n",
+            "12345678\n",
+            "not-hex! Name\n",
+            "????? name\n",
+            "0000000000000000 Name\n",
         ] {
-            assert!(read_source(input.as_bytes(), Universe::Types).is_err());
+            assert!(read_source(input.as_bytes(), Table::BinTypes).is_err());
         }
-        for name in ["--TYPES--", " padded", "trailing ", "nul\0name"] {
-            assert!(
-                read_source(source(Universe::Types, &[name]).as_bytes(), Universe::Types).is_err()
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_invalid_tables() {
-        for input in [
-            "RITO-HASHES 1\n--GAME--\n",
-            "RITO-HASHES 2\nname\n",
-            "RITO-HASHES 2\n--UNKNOWN--\n",
-            "RITO-HASHES 2\n--TYPES--\n--TYPES--\n",
-            "RITO-HASHES 2\n--TYPES--\n--ENTRIES--\n",
-            "RITO-HASHES 2\n--TYPES--\nz\na\n",
-            "RITO-HASHES 2\n--TYPES--\na\na\n",
-            "RITO-HASHES 2\n--TYPES--\n\n",
-            "RITO-HASHES 2\n",
-        ] {
-            assert!(
-                visit_names(input.as_bytes(), |_, _| Ok(())).is_err(),
-                "{input}"
-            );
-        }
+        assert!(read_source(b"00000001 \xff\n".as_slice(), Table::BinTypes).is_err());
     }
 }

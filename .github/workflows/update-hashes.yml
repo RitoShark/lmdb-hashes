@@ -1,4 +1,4 @@
-﻿name: Update Name Tables
+name: Update LMDB Hashes
 
 on:
   schedule:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: publish-name-tables
+  group: publish-lmdb-hashes
   cancel-in-progress: false
 
 jobs:
@@ -31,6 +31,7 @@ jobs:
       - run: cargo test --locked --all-targets
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo run --locked --release -- output work
+      - run: cargo test --locked --release --test corpus -- --ignored
       - name: Publish version 2 tables
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -38,20 +39,20 @@ jobs:
         run: |
           set -euo pipefail
           FP=$(cat output/fingerprint-v2.sha256)
-          TAG="names-v2-${FP:0:16}"
+          TAG="hashes-v2-${FP:0:16}"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "### Unchanged: $TAG" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           cat > output/release-notes.md <<EOF
-          Name-only hash tables from CommunityDragon, format version 2.
+          LMDB hash databases from CommunityDragon, schema version 2.
 
-          - lol-names-v2-combined.txt.zst: GAME, ENTRIES, HASHES, FIELDS, TYPES
-          - lol-names-v2-wad.txt.zst: GAME
-          - lol-names-v2-bin.txt.zst: ENTRIES, HASHES, FIELDS, TYPES
+          - lol-hashes-v2-combined.zst: wad, binentries, binhashes, binfields, bintypes
+          - lol-hashes-v2-wad.zst: wad
+          - lol-hashes-v2-bin.zst: binentries, binhashes, binfields, bintypes
 
-          Decompress to UTF-8 text. Hashes are calculated by the reader; BIN universes stay separate.
-          These files are not LMDB databases. Version 2 is published as a prerelease during consumer migration, preserving the latest legacy LMDB release.
+          Decompress to data.mdb and open with LMDB. Hashes remain big-endian keys and names remain UTF-8 values.
+          BIN categories now use separate named databases. Version 2 is published as a prerelease during consumer migration, preserving the latest legacy LMDB release.
 
           [File format](https://github.com/RitoShark/lmdb-hashes/blob/${GITHUB_SHA}/docs/file-format.md)
           [Migration guide](https://github.com/RitoShark/lmdb-hashes/blob/${GITHUB_SHA}/docs/migration.md)
@@ -59,12 +60,12 @@ jobs:
           Source fingerprint: $FP
           EOF
           gh release create "$TAG" \
-            output/lol-names-v2-combined.txt.zst \
-            output/lol-names-v2-wad.txt.zst \
-            output/lol-names-v2-bin.txt.zst \
+            output/lol-hashes-v2-combined.zst \
+            output/lol-hashes-v2-wad.zst \
+            output/lol-hashes-v2-bin.zst \
             output/fingerprint-v2.sha256 \
             --target "$GITHUB_SHA" \
-            --title "Name tables $TAG" \
+            --title "LMDB hashes $TAG" \
             --notes-file output/release-notes.md \
             --prerelease --latest=false
           echo "### Published: $TAG" >> "$GITHUB_STEP_SUMMARY"

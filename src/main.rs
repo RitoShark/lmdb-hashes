@@ -1,4 +1,4 @@
-use lmdb_hash_builder::{read_source, write_tables, Universe, MAGIC};
+use lmdb_hash_builder::{build_lmdb, read_source, Table, SCHEMA};
 use reqwest::blocking::Client;
 use sha2::{Digest, Sha256};
 use std::error::Error;
@@ -9,15 +9,15 @@ use std::time::Duration;
 
 const SOURCE: &str = "https://raw.githubusercontent.com/CommunityDragon/Data/master/hashes/lol";
 const ASSETS: [&str; 3] = [
-    "lol-names-v2-combined.txt.zst",
-    "lol-names-v2-wad.txt.zst",
-    "lol-names-v2-bin.txt.zst",
+    "lol-hashes-v2-combined.zst",
+    "lol-hashes-v2-wad.zst",
+    "lol-hashes-v2-bin.zst",
 ];
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("Usage: lmdb-hash-builder [OUTPUT [WORK]] [--offline]\n\nBuild version 2 name tables. --offline uses existing source files in WORK.");
+        println!("Usage: lmdb-hash-builder [OUTPUT [WORK]] [--offline]\n\nBuild LMDB databases with separate BIN tables. --offline uses existing source files in WORK.");
         return Ok(());
     }
     let offline = args.iter().any(|arg| arg == "--offline");
@@ -44,24 +44,27 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
     let mut tables = Vec::new();
-    for universe in Universe::ALL {
-        let names = read_source(
-            BufReader::new(File::open(work.join(universe.source()))?),
-            universe,
+    for table in Table::ALL {
+        let entries = read_source(
+            BufReader::new(File::open(work.join(table.source()))?),
+            table,
         )?;
-        eprintln!("{}: {} names", universe.header(), names.len());
-        tables.push((universe, names));
+        eprintln!("{}: {} records", table.name(), entries.len());
+        tables.push((table, entries));
     }
     for (asset, selected) in [
         (ASSETS[0], tables.as_slice()),
         (ASSETS[1], &tables[..1]),
         (ASSETS[2], &tables[1..]),
     ] {
+        let database_dir = tempfile::tempdir_in(output)?;
+        build_lmdb(database_dir.path(), selected)?;
         let temporary = output.join(format!("{asset}.tmp"));
         let file = BufWriter::new(File::create(&temporary)?);
         let mut encoder = zstd::Encoder::new(file, 19)?;
         encoder.include_checksum(true)?;
-        write_tables(&mut encoder, selected)?;
+        let mut data = BufReader::new(File::open(database_dir.path().join("data.mdb"))?);
+        io::copy(&mut data, &mut encoder)?;
         let mut file = encoder.finish()?;
         file.flush()?;
         file.get_ref().sync_all()?;
@@ -77,12 +80,12 @@ fn download_sources(work: &Path) -> Result<(), Box<dyn Error>> {
     let client = Client::builder()
         .timeout(Duration::from_secs(300))
         .build()?;
-    for universe in Universe::ALL {
-        let temporary = work.join(format!("{}.tmp", universe.source()));
+    for table in Table::ALL {
+        let temporary = work.join(format!("{}.tmp", table.source()));
         let mut file = BufWriter::new(File::create(&temporary)?);
-        if universe == Universe::Game {
+        if table == Table::Wad {
             for part in 0u32.. {
-                let url = format!("{SOURCE}/{}.{part}", universe.source());
+                let url = format!("{SOURCE}/{}.{part}", table.source());
                 eprintln!("Downloading {url}");
                 let response = client.get(&url).send()?;
                 if response.status() == reqwest::StatusCode::NOT_FOUND && part > 0 {
@@ -91,13 +94,13 @@ fn download_sources(work: &Path) -> Result<(), Box<dyn Error>> {
                 copy_response(response, &mut file)?;
             }
         } else {
-            let url = format!("{SOURCE}/{}", universe.source());
+            let url = format!("{SOURCE}/{}", table.source());
             eprintln!("Downloading {url}");
             copy_response(client.get(url).send()?, &mut file)?;
         }
         file.flush()?;
         drop(file);
-        fs::rename(temporary, work.join(universe.source()))?;
+        fs::rename(temporary, work.join(table.source()))?;
     }
     Ok(())
 }
@@ -119,12 +122,12 @@ fn copy_response(
 
 fn fingerprint(work: &Path) -> io::Result<String> {
     let mut hasher = Sha256::new();
-    hasher.update(MAGIC);
+    hasher.update(SCHEMA);
     hasher.update(env!("CARGO_PKG_VERSION"));
     let mut buffer = [0u8; 64 * 1024];
-    for universe in Universe::ALL {
-        hasher.update(universe.source());
-        let mut file = File::open(work.join(universe.source()))?;
+    for table in Table::ALL {
+        hasher.update(table.source());
+        let mut file = File::open(work.join(table.source()))?;
         hasher.update(file.metadata()?.len().to_le_bytes());
         loop {
             let length = file.read(&mut buffer)?;
