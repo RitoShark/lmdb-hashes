@@ -1,43 +1,75 @@
-# lmdb-hashes
+﻿# lmdb-hashes
 
-Automated LMDB hash database builder for League of Legends file path lookups. Downloads hash tables from [CommunityDragon](https://github.com/CommunityDragon/Data/tree/master/hashes/lol), packs them into LMDB databases, and publishes zstd-compressed releases.
+Compact name tables for League of Legends hash lookups, built from
+[CommunityDragon](https://github.com/CommunityDragon/Data/tree/master/hashes/lol).
 
-## Variants
+Version 2 stores **only names**. Applications calculate hashes while loading the
+tables. WAD paths and each BIN category stay separate, so entries, types, fields,
+and hash-value names cannot overwrite one another.
 
-| File | Contents | Key format |
-|------|----------|------------|
-| `lol-hashes-combined.zst` | WAD + BIN hashes | Both |
-| `lol-hashes-wad.zst` | WAD path hashes only | `u64` xxhash64 (BE) |
-| `lol-hashes-bin.zst` | BIN name hashes only | `u32` FNV1a (BE) |
-
-Each `.zst` file decompresses to an LMDB `data.mdb` with named databases (`wad`, `bin`, or both).
-
-## Usage
-
-Download the latest release:
-
-```
-https://github.com/RitoShark/lmdb-hashes/releases/latest/download/lol-hashes-combined.zst
-```
-
-Decompress with zstd and open with any LMDB client (e.g. `heed` in Rust):
-
-```rust
-let data = zstd::decode_all(compressed_bytes.as_slice())?;
-std::fs::write("hashes.mdb", &data)?;
-let env = EnvOpenOptions::new().max_dbs(2).open("hashes_dir")?;
-let wad_db: Database<Bytes, Str> = env.open_database(&rtxn, Some("wad"))?;
-let path = wad_db.get(&rtxn, &hash.to_be_bytes())?; // "data/characters/ahri/skins/skin0.bin"
+```text
+RITO-HASHES 2
+--ENTRIES--
+Example/Entry
+--HASHES--
+ExampleValue
+--FIELDS--
+ExampleField
+--TYPES--
+ExampleType
 ```
 
-## Automation
+## Get the tables
 
-A GitHub Action runs every 6 hours, rebuilds only if CommunityDragon hashes have changed (SHA-256 fingerprint check), and publishes a new release while cleaning up old ones.
+Choose a `names-v2-*` prerelease from [Releases](https://github.com/RitoShark/lmdb-hashes/releases).
+Each asset decompresses with zstd to a readable UTF-8 text file.
 
-## Building locally
+| Asset | Sections |
+| --- | --- |
+| `lol-names-v2-combined.txt.zst` | GAME, ENTRIES, HASHES, FIELDS, TYPES |
+| `lol-names-v2-wad.txt.zst` | GAME |
+| `lol-names-v2-bin.txt.zst` | ENTRIES, HASHES, FIELDS, TYPES |
+
+The combined file keeps the same separate sections. Only exact duplicate names
+within a section are removed; distinct names sharing a hash are retained.
+
+**Existing LMDB consumers need a reader update.** Version 2 uses new filenames
+and a separate prerelease channel. The last stable LMDB release stays available
+at the old download URLs. See the [migration guide](docs/migration.md).
+
+## Build locally
+
+Install stable Rust and your platform's C/C++ build tools, then run:
 
 ```bash
-cargo run --release -- output work
+cargo run --locked --release -- output work
 ```
 
-Produces `output/*.zst` files and a `fingerprint.sha256`.
+The builder downloads source files into `work/` and writes the three compressed
+tables plus `fingerprint-v2.sha256` into `output/`. Reuse downloaded sources with:
+
+```bash
+cargo run --locked --release -- output work --offline
+```
+
+Read and hash a generated table with the included example:
+
+```bash
+cargo run --locked --release --example read -- output/lol-names-v2-bin.txt.zst
+```
+
+The release workflow checks CommunityDragon every six hours. Existing release
+fingerprints skip publication; old releases are retained during migration.
+
+## Documentation
+
+- [File format](docs/file-format.md): layout, sections, hash algorithms, and collisions.
+- [Migration](docs/migration.md): updating LMDB consumers and release URLs.
+- [Development](docs/development.md): repository layout, pipeline, testing, and automation.
+- [Contributing](CONTRIBUTING.md), [Code of Conduct](CODE_OF_CONDUCT.md), and [Security](SECURITY.md).
+
+## Source
+
+The name corpus comes from [CommunityDragon's hash tables](https://github.com/CommunityDragon/Data/tree/master/hashes/lol).
+Corrections to source names belong upstream. This repository builds and distributes
+the tables; it is not affiliated with Riot Games.
