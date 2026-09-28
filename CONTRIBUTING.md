@@ -33,6 +33,7 @@ names` or `Reject malformed source records`.
 
 Pull requests should explain the behavior change and the checks run. Update the
 format and migration docs when readers are affected, and bump the builder version
-when output behavior changes. Preserve hash universes and collision candidates.
+when output behavior changes. Keep hash universes separate and report conflicting
+names within a table instead of silently overwriting them.
 
 Participation follows the [Code of Conduct](CODE_OF_CONDUCT.md).

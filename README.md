@@ -1,75 +1,92 @@
-﻿# lmdb-hashes
+# lmdb-hashes
 
-Compact name tables for League of Legends hash lookups, built from
+LMDB hash databases for League of Legends tools, built from
 [CommunityDragon](https://github.com/CommunityDragon/Data/tree/master/hashes/lol).
 
-Version 2 stores **only names**. Applications calculate hashes while loading the
-tables. WAD paths and each BIN category stay separate, so entries, types, fields,
-and hash-value names cannot overwrite one another.
+Open the database and look up a hash directly. Names stay in memory-mapped LMDB
+pages, so applications do not need to parse a text corpus or rebuild an index.
+Processes opening the same database file can share its pages through the OS.
+
+## Organized by hash universe
+
+The combined database contains five independent named databases:
 
 ```text
-RITO-HASHES 2
---ENTRIES--
-Example/Entry
---HASHES--
-ExampleValue
---FIELDS--
-ExampleField
---TYPES--
-ExampleType
+data.mdb
+??? wad
+??? binentries
+??? binhashes
+??? binfields
+??? bintypes
 ```
 
-## Get the tables
+BIN entries, hash values, fields, and types stay separate. The same numeric hash
+can resolve to a different name in each category without one replacing another.
+Hashes remain the lookup keys; values contain only the original names.
 
-Choose a `names-v2-*` prerelease from [Releases](https://github.com/RitoShark/lmdb-hashes/releases).
-Each asset decompresses with zstd to a readable UTF-8 text file.
+## Downloads
 
-| Asset | Sections |
+Choose a `hashes-v2-*` prerelease from [Releases](https://github.com/RitoShark/lmdb-hashes/releases).
+Decompress the chosen archive to `data.mdb` inside a database directory.
+
+| Asset | Named databases |
 | --- | --- |
-| `lol-names-v2-combined.txt.zst` | GAME, ENTRIES, HASHES, FIELDS, TYPES |
-| `lol-names-v2-wad.txt.zst` | GAME |
-| `lol-names-v2-bin.txt.zst` | ENTRIES, HASHES, FIELDS, TYPES |
+| `lol-hashes-v2-combined.zst` | All five |
+| `lol-hashes-v2-wad.zst` | `wad` |
+| `lol-hashes-v2-bin.zst` | `binentries`, `binhashes`, `binfields`, `bintypes` |
 
-The combined file keeps the same separate sections. Only exact duplicate names
-within a section are removed; distinct names sharing a hash are retained.
+Version 2 changes the BIN schema, not the storage engine. Existing BIN readers
+must select the appropriate table instead of opening `bin`. The previous stable
+release stays available at the old download URLs during migration.
 
-**Existing LMDB consumers need a reader update.** Version 2 uses new filenames
-and a separate prerelease channel. The last stable LMDB release stays available
-at the old download URLs. See the [migration guide](docs/migration.md).
+## Read a name
+
+Using Rust and `heed = "0.20"`, after decompressing to `hashes/data.mdb`:
+
+```rust
+use heed::types::{Bytes, Str};
+use heed::{Database, EnvFlags, EnvOpenOptions};
+
+let env = unsafe {
+    EnvOpenOptions::new()
+        .max_dbs(5)
+        .flags(EnvFlags::READ_ONLY)
+        .open("hashes")?
+};
+let txn = env.read_txn()?;
+let types: Database<Bytes, Str> = env
+    .open_database(&txn, Some("bintypes"))?
+    .ok_or("missing bintypes database")?;
+let name = types.get(&txn, &0x4247cbb9u32.to_be_bytes())?;
+```
+
+Keep the environment open and reuse it. Returned strings borrow from the read
+transaction. See [migration](docs/migration.md) for shared caches and table routing.
 
 ## Build locally
 
-Install stable Rust and your platform's C/C++ build tools, then run:
+Requires stable Rust and the platform's C/C++ build tools.
 
 ```bash
 cargo run --locked --release -- output work
 ```
 
-The builder downloads source files into `work/` and writes the three compressed
-tables plus `fingerprint-v2.sha256` into `output/`. Reuse downloaded sources with:
+Sources are downloaded into `work/`. The three archives and
+`fingerprint-v2.sha256` are written to `output/`. To reuse downloaded sources:
 
 ```bash
 cargo run --locked --release -- output work --offline
 ```
 
-Read and hash a generated table with the included example:
-
-```bash
-cargo run --locked --release --example read -- output/lol-names-v2-bin.txt.zst
-```
-
-The release workflow checks CommunityDragon every six hours. Existing release
-fingerprints skip publication; old releases are retained during migration.
+The release workflow runs every six hours. It publishes changed fingerprints and
+retains existing releases during migration.
 
 ## Documentation
 
-- [File format](docs/file-format.md): layout, sections, hash algorithms, and collisions.
-- [Migration](docs/migration.md): updating LMDB consumers and release URLs.
-- [Development](docs/development.md): repository layout, pipeline, testing, and automation.
+- [File format](docs/file-format.md): LMDB layout, keys, values, and collisions.
+- [Migration](docs/migration.md): table selection and shared database files.
+- [Development](docs/development.md): build pipeline, repository layout, and tests.
 - [Contributing](CONTRIBUTING.md), [Code of Conduct](CODE_OF_CONDUCT.md), and [Security](SECURITY.md).
 
-## Source
-
-The name corpus comes from [CommunityDragon's hash tables](https://github.com/CommunityDragon/Data/tree/master/hashes/lol).
-Corrections to source names belong upstream. This repository builds and distributes
-the tables; it is not affiliated with Riot Games.
+The source corpus comes from CommunityDragon. Source corrections belong upstream.
+This project is not affiliated with Riot Games.

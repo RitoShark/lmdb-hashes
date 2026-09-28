@@ -1,72 +1,76 @@
-# How the builder works
+# Development
 
-## Repository map
+## Repository layout
 
 | Path | Purpose |
 | --- | --- |
-| `src/main.rs` | CLI, downloads, fingerprinting, compression, output files |
-| `src/lib.rs` | Universes, hashing, source validation, text reader and writer |
-| `examples/read.rs` | Streaming reader example |
-| `examples/audit.rs` | Compare every source hash with its calculated value |
-| `tests/builder.rs` | Offline CLI integration test |
+| `src/main.rs` | Downloads, fingerprint, CLI, compression |
+| `src/lib.rs` | Source parsing, table definitions, LMDB construction |
+| `examples/read.rs` | Direct LMDB reader |
+| `tests/builder.rs` | Offline build, table isolation, archive and rebuild tests |
+| `tests/corpus.rs` | Optional full-corpus archive verification |
 | `.github/workflows/check.yml` | Windows and Linux checks |
-| `.github/workflows/update-hashes.yml` | Scheduled builds and release publication |
+| `.github/workflows/update-hashes.yml` | Scheduled builds and publication |
 
 ## Build pipeline
 
-1. Fetch `hashes.game.txt.0`, `.1`, and so on until a 404. A 404 on part zero,
-   any other HTTP failure, or an empty response fails the build. Fetch the four
-   BIN source files separately. Downloads have a five-minute request timeout.
-2. Calculate the versioned fingerprint from the five expected source files.
-   Unrelated files in the work directory are ignored. Skip only if the fingerprint
-   matches and all three output assets exist.
-3. Parse every source and verify every supplied hash. Reject invalid UTF-8,
-   malformed records, unsupported names, mismatches, and empty tables. Empty
-   source lines and lines starting with `#` are ignored.
-4. Sort names within their own universe and remove exact duplicates. No names
-   are deduplicated by hash or across universes.
-5. Stream the three variants into zstd encoders. Each asset is written to a
-   temporary file, flushed, and renamed. Write the fingerprint after all succeed.
+1. Download numbered GAME parts until a terminal 404, plus the four BIN files.
+   Part zero must exist. Empty responses and other HTTP failures abort.
+2. Fingerprint the schema, package version, and five expected source files.
+   Skip only when that fingerprint matches and all three archives exist.
+3. Parse each source separately, retaining supplied keys and original names.
+   Deduplicate identical pairs and reject conflicting names within a category.
+4. Build each variant in a fresh temporary LMDB directory under the output
+   directory. A single transaction creates its named databases and inserts records.
+5. Commit, sync, and close LMDB. Stream its `data.mdb` into a checksummed zstd
+   archive, then rename the completed archive into place.
+6. Write the fingerprint only after all variants finish.
 
-Sources and individual assets use temporary files beside their destination.
-The complete three-file output is not one atomic transaction; if interrupted,
-rerun the builder before consuming or publishing it. Do not run two builders
-against the same directories. An unchanged build checks asset existence, not
-asset integrity; remove damaged assets to force regeneration.
+The LMDB map size is a 2 GiB virtual address reservation, not a 2 GiB allocation
+of resident memory. The builder holds parsed records while sorting; readers do
+not need to load all records into private memory.
 
-The builder holds parsed names for all universes in memory while sorting, but
-does not build LMDB indexes or buffer whole compressed outputs. Consumers can
-stream parsing and hashing; memory use then depends on their chosen index.
+Only archives and the fingerprint are retained. Temporary LMDB directories are
+removed after compression. Each archive is replaced independently, so the three
+outputs are not an atomic set. Rerun an interrupted build before publication.
+Run only one builder per work/output directory. Existing output checks test
+presence, not integrity; remove a damaged archive to force regeneration.
 
 ## Commands
 
-Requires stable Rust and the platform's Rust C/C++ build tools for zstd.
-Linux also needs OpenSSL development packages for reqwest's default TLS backend.
+Requires stable Rust and C/C++ build tools for LMDB and zstd. Linux needs OpenSSL
+development packages for reqwest's default TLS backend.
 
 ```bash
 cargo run --locked --release -- output work
 cargo run --locked --release -- output work --offline
-cargo run --locked --release --example audit -- work
 cargo fmt --check
 cargo test --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-Offline mode expects `hashes.game.txt` and the four BIN source files in `work`.
-Their input format is hexadecimal hash, one ASCII space, then the original name.
-GAME hashes have 16 hex digits and BIN hashes have 8. Offline mode makes no
-network requests. Running Cargo itself may require downloading dependencies
-unless they are already cached.
+Offline mode expects `hashes.game.txt` and all four BIN source files in `work/`.
+The builder makes no requests in offline mode; Cargo may still need dependencies.
 
-## Automation
+Tests decompress real builder output, open it with heed, and check that the same
+numeric hash resolves independently in every category. They also cover source
+validation, supplied hash preservation, duplicate handling, unchanged builds,
+missing output regeneration, and failed builds retaining prior outputs.
 
-The publication workflow runs every six hours and on manual dispatch. It runs
-checks, downloads sources, and builds the assets. A release tag contains the
-first 16 fingerprint digits; if that tag already exists, publication is skipped.
-Fresh runners still download and build before checking the release tag.
-Publication is serialized and old releases are retained.
+After building the full corpus into the default directories, verify every
+source mapping in all three archives:
 
-Bump the package version when changing builder output behavior so unchanged
-source data cannot reuse an older fingerprint. Commit `Cargo.lock` with dependency
-updates. Changes to the public format also need a new magic/version and a
-coordinated consumer migration.
+```bash
+cargo test --locked --release --test corpus -- --ignored --nocapture
+```
+
+## Releases
+
+The workflow runs every six hours and on manual dispatch. Checks run before the
+build. Tags use `hashes-v2-` plus the first 16 fingerprint digits; an existing tag
+skips publication. Fresh runners download and build before checking the tag.
+Publication is serialized and existing releases are retained during migration.
+
+Bump the package version when output behavior changes so the fingerprint cannot
+reuse an older build. Commit Cargo.lock with dependency changes. Changes to table
+names or key encodings require coordinated reader updates and new asset names.

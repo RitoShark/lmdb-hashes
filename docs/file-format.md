@@ -1,104 +1,73 @@
-# File format: version 2
+# LMDB schema, version 2
 
-Version 2 stores names in a zstd-compressed UTF-8 text file. It stores no numeric
-game or BIN hashes, database pages, offsets, or indexes. Readers calculate hashes
-while loading names and build whatever lookup structure they need.
+The storage engine remains LMDB, built with `heed 0.20`. Each release archive is
+one zstd frame containing the bytes of an LMDB `data.mdb`. There is no custom text
+header, line-based database format, or Mimir dependency.
 
-## Layout
+Version 2 identifies the named-database schema through its asset names and release
+tags. It does not change LMDB's own file format or add a header before LMDB data.
 
-```text
-RITO-HASHES 2
---GAME--
-data/example.bin
---ENTRIES--
-Example/Entry
---HASHES--
-ExampleValue
---FIELDS--
-ExampleField
---TYPES--
-ExampleType
-```
+## Named databases
 
-These are illustrative names. `--HASHES--` identifies BIN hash-value names;
-its records are still names, not hexadecimal numbers.
-
-| Section | Source file | Hash |
+| Database | Source | Key |
 | --- | --- | --- |
-| `--GAME--` | `hashes.game.txt.*` | XXH64, seed 0, 64 bits |
-| `--ENTRIES--` | `hashes.binentries.txt` | FNV-1a, 32 bits |
-| `--HASHES--` | `hashes.binhashes.txt` | FNV-1a, 32 bits |
-| `--FIELDS--` | `hashes.binfields.txt` | FNV-1a, 32 bits |
-| `--TYPES--` | `hashes.bintypes.txt` | FNV-1a, 32 bits |
+| `wad` | `hashes.game.txt.*` | 8-byte unsigned integer, big-endian |
+| `binentries` | `hashes.binentries.txt` | 4-byte unsigned integer, big-endian |
+| `binhashes` | `hashes.binhashes.txt` | 4-byte unsigned integer, big-endian |
+| `binfields` | `hashes.binfields.txt` | 4-byte unsigned integer, big-endian |
+| `bintypes` | `hashes.bintypes.txt` | 4-byte unsigned integer, big-endian |
 
-The combined variant contains all five sections in this order. WAD contains
-only GAME. BIN contains ENTRIES, HASHES, FIELDS, TYPES in that order. Combining
-files is packaging only: lookup keys must include the universe.
+Values are the source names encoded as UTF-8, without a length prefix or trailing
+NUL added by this application. The hash is stored once as the key; it is not
+repeated in the value. LMDB manages record lengths and its B-tree index.
 
-## Text rules
+The combined variant contains all five named databases. WAD contains only `wad`.
+BIN contains the four `bin*` databases. There is no merged `bin` database.
+The unnamed LMDB database is reserved for LMDB's named-database catalog.
 
-- The first line is exactly `RITO-HASHES 2`, without a byte order mark.
-- Writers use LF line endings, including after the last line. Readers also
-  accept CRLF and a final line without a terminator.
-- At least one section is required. Sections appear once, in the order above.
-  A general reader may accept any ordered subset; each release variant has
-  the exact sections listed above.
-- A section ends at the next section header or end of file. Empty sections are
-  valid, although the builder rejects empty upstream tables.
-- Each remaining line is one name, with original case and internal spaces
-  preserved. Names must be nonempty, have no leading or trailing whitespace,
-  and contain no CR, LF, or NUL characters.
-- Lines beginning and ending with `--` are reserved for section headers.
-  There is no escaping, comment syntax, or blank-line separator in this format.
-- Names are sorted lexicographically by UTF-8 bytes within each section.
-  Only exact duplicate names within the same section are removed.
-- Readers reject unsupported versions, unknown sections, repeated or unordered
-  sections, invalid names, duplicate names, and unordered names.
+All named databases use LMDB's default byte ordering, with no integer-key or
+duplicate-value flags. Big-endian encoding preserves numeric ordering.
+Configure readers with `max_dbs(5)` for the combined schema.
 
-## Reconstructing hashes
+## Hash semantics
 
-Convert ASCII `A` through `Z` to `a` through `z`, leaving every other UTF-8 byte
-unchanged. Do not apply locale-dependent or Unicode case folding, normalize
-slashes, trim names, or add a WAD filename prefix.
+League WAD paths generally use XXH64 with seed zero. BIN names generally use
+FNV-1a 32. Hashing new names requires ASCII lowercasing first.
 
-For GAME, apply XXH64 with seed 0 to those bytes. For each BIN universe, start
-with `0x811c9dc5`; for each byte, XOR it into the accumulator and multiply by
-`0x01000193`, wrapping at 32 bits. There is no byte order in the text format;
-byte order matters only if a consumer serializes its own numeric index.
+The builder preserves the supplied source hash, rather than deriving it again.
+This keeps existing mappings, including any unusual source hash/name pair.
+For example, the audited CommunityDragon corpus contains
+`10e25123126b83b0 assets/perks/styles/style5/futuresmarket/futures.ps4.market.dds`.
+Its supplied hash is retained even though recalculating the path produces
+`23e64b6f85cdef58`.
 
-Distinct names may have the same hash, including names differing only in case.
-Keep those names. A lossless index maps `(universe, hash)` to a list of names.
-Never use one BIN map for all four universes: a collision in one category must
-not replace a name in another.
+The input has 16 hexadecimal digits for WAD or 8 for BIN, followed by one ASCII
+space and the name. The separator is removed, and the remaining name is preserved,
+including its case, leading/trailing spaces, or an empty string. CRLF and LF source
+line endings are accepted. Empty lines and lines beginning with `#` are ignored.
+Malformed records, invalid UTF-8, and empty source tables fail the build.
 
-The builder reads upstream hexadecimal hashes only to verify that each can be
-reconstructed. A mismatch stops the build with its source file and line number;
-it is not silently omitted or written under a different hash.
+## Collisions
 
-## Compression and integrity
+Each database is an independent hash universe. Identical numeric keys across
+different tables are valid and never overwrite each other.
 
-Each `.txt.zst` asset is one zstd frame with its content checksum enabled,
-compressed at level 19. Decompress before parsing. Treat decompression or parsing
-errors as a failed load, and only install a new lookup after the entire load
-succeeds. The streaming callback may have visited names before a later error.
+Within one table, identical hash/name pairs are deduplicated. Different names
+for the same hash fail the build rather than silently selecting one. This differs
+from the old builder, which kept the first record after sorting by hash.
 
-`fingerprint-v2.sha256` is a build identity, not an asset checksum. Its SHA-256
-input is the concatenation of:
+## Compression and fingerprint
 
-1. The magic string without a newline, then the Cargo package version.
-2. For each universe in canonical order: the source filename, its byte length
-   as a little-endian `u64`, and the complete downloaded source bytes.
+Archives use zstd level 19 with the content checksum enabled. Decompress once at
+installation time, then open `data.mdb` directly for lookups.
 
-The downloaded GAME source is the concatenation of sequential numbered parts.
-A missing terminal LF is added to each downloaded file or part. Changing the
-format, builder version, source names, or source bytes changes the fingerprint.
+`fingerprint-v2.sha256` identifies the build inputs; it is not an archive checksum.
+It hashes the schema identifier `lmdb-hashes-separated-v2`, the package version,
+and then each expected source's filename, byte length as little-endian `u64`,
+and complete source bytes. Source order is wad, binentries, binhashes, binfields,
+bintypes. Downloaded GAME parts are concatenated in numeric order, adding a
+terminal LF to a part if missing.
 
-## Reference implementation
-
-[`src/lib.rs`](../src/lib.rs) provides `Universe::hash`, `read_source`,
-`write_tables`, and `visit_names`. [`examples/read.rs`](../examples/read.rs)
-decompresses a table, validates it, calculates its hashes, and prints counts:
-
-```bash
-cargo run --release --example read -- output/lol-names-v2-bin.txt.zst
-```
+LMDB's on-disk representation depends on platform architecture and page size.
+Published files are built on the workflow's Ubuntu runner. Validate compatibility
+before supporting a new architecture or page size.

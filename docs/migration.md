@@ -1,42 +1,64 @@
-# Migrating from LMDB
+# Migrating to separate LMDB tables
 
-Version 2 changes both storage and lookup structure. Update a consumer's reader
-before changing its download URL.
+The storage engine, hash key encoding, and direct lookup model stay the same.
+The change is that the old merged `bin` database becomes four named databases.
 
-| Legacy | Version 2 |
-| --- | --- |
-| `lol-hashes-*.zst` | `lol-names-v2-*.txt.zst` |
-| Decompress to LMDB `data.mdb` | Decompress to UTF-8 text |
-| `wad` database with big-endian `u64` keys | GAME section; calculate XXH64 |
-| One `bin` database with big-endian `u32` keys | Four BIN sections; calculate FNV-1a separately |
-| One surviving name per hash | All distinct names retained per universe |
+| Lookup | Database | Key |
+| --- | --- | --- |
+| WAD path | `wad` | `u64::to_be_bytes()` |
+| BIN entry path | `binentries` | `u32::to_be_bytes()` |
+| BIN class or struct type | `bintypes` | `u32::to_be_bytes()` |
+| BIN field name | `binfields` | `u32::to_be_bytes()` |
+| BIN hash-valued data | `binhashes` | `u32::to_be_bytes()` |
 
-## Consumer changes
+## Reader changes
 
-1. Download the desired version 2 variant from a `names-v2-*` release.
-2. Stream the decompressed text through a version-aware reader.
-3. Calculate each name's hash using the [format rules](file-format.md).
-4. Build separate indexes for GAME, ENTRIES, HASHES, FIELDS, and TYPES. Preserve
-   collision candidates instead of overwriting them.
-5. Route BIN entry paths to ENTRIES, class names to TYPES, field names to FIELDS,
-   and hash-valued data to HASHES. GAME is for WAD paths.
-6. Replace the active cache only after decompression and validation succeed.
+1. Download a `lol-hashes-v2-*.zst` asset and decompress it to `data.mdb`.
+2. Open the environment with capacity for five named databases.
+3. Open the appropriate database for each lookup category.
+4. Keep the environment open and borrow names through read transactions.
+5. Treat an unknown hash as unresolved within its category. Do not fall back to
+   searching all BIN tables, which would reintroduce ambiguity.
 
-Flint, Jade, Hematite, and other LMDB consumers need their own reader changes.
-This repository does not update those applications. Once consumers are migrated,
-the release workflow can promote version 2 to the stable release channel.
+The `wad` database has the same name and key encoding as before. BIN callers need
+category information; a generic `resolve_bin(hash)` should become a lookup that
+takes a category or separate category-specific methods.
+
+No text parsing, bulk rehashing, or resident hash map is needed. The reference
+reader in [examples/read.rs](../examples/read.rs) opens LMDB directly:
+
+```bash
+cargo run --locked --release --example read -- path/to/database-directory
+```
+
+Flint, Jade, Hematite, and other consumers need their BIN table selections updated
+in their own repositories. This change does not modify those apps.
+
+## Sharing memory across apps
+
+LMDB maps the database file. Apps opening the same physical `data.mdb` can share
+its file-backed pages through the operating system. Decompressing separate copies
+into each application's cache does not provide that same file-backed sharing.
+
+Point apps at one shared database directory. Open it read-only and leave LMDB's
+normal locking enabled. The directory must allow LMDB to manage its `lock.mdb`
+file; distribute `data.mdb` only, not a builder's lock file.
+
+Install updates into new versioned directories and switch the shared cache's
+active path only after successful decompression and validation. Existing readers
+can finish using the old version. Do not overwrite or truncate a database that
+apps have mapped. On Windows, wait for readers to close before removing an old
+version.
+
+The builder does not install or manage an application-wide shared cache; consumers
+must agree on its path and update ownership.
 
 ## Release transition
 
-The workflow publishes version 2 as prereleases with `--latest=false`. Existing
-releases are retained, so `/releases/latest/download/lol-hashes-*.zst` continues
-to use the last stable LMDB release. That legacy dataset is frozen; this builder
-only produces version 2 tables.
+New assets use `lol-hashes-v2-{combined,wad,bin}.zst`, published in `hashes-v2-*`
+prereleases with `--latest=false`. Existing stable releases are retained so apps
+expecting the old `bin` database continue to download the legacy schema.
 
-Choose a `names-v2-*` release from the [release list](https://github.com/RitoShark/lmdb-hashes/releases).
-Do not use `/releases/latest` to discover version 2 during the transition.
-For scripts, list releases with the GitHub API and select the newest nondraft
-release whose tag begins with `names-v2-`, then use its asset download URLs.
-
-Retain old local LMDB caches until the consumer's migration succeeds. Version 2
-output names do not overwrite legacy assets or LMDB directories.
+The old stable corpus is frozen by this builder. Once consumers are updated,
+version 2 can be promoted to the stable channel. During migration, select a
+`hashes-v2-*` release from the release list instead of `/releases/latest`.
