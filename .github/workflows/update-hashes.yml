@@ -1,119 +1,70 @@
-name: Update Hash DB
+﻿name: Update Name Tables
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # Every 6 hours
-  workflow_dispatch: # Manual trigger
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: publish-name-tables
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Build hash-builder
-        run: cargo build --release
-
-      - name: Run hash-builder
-        run: ./target/release/lmdb-hash-builder output work
-
-      - name: Check if output exists
-        id: check
-        run: |
-          if [ -f output/lol-hashes-combined.zst ]; then
-            echo "has_output=true" >> $GITHUB_OUTPUT
-            echo "combined_size=$(stat -c%s output/lol-hashes-combined.zst)" >> $GITHUB_OUTPUT
-            echo "wad_size=$(stat -c%s output/lol-hashes-wad.zst)" >> $GITHUB_OUTPUT
-            echo "bin_size=$(stat -c%s output/lol-hashes-bin.zst)" >> $GITHUB_OUTPUT
-            echo "fingerprint=$(cat output/fingerprint.sha256)" >> $GITHUB_OUTPUT
-          else
-            echo "has_output=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Check if release already exists
-        if: steps.check.outputs.has_output == 'true'
-        id: existing
-        run: |
-          FP="${{ steps.check.outputs.fingerprint }}"
-          TAG="v${FP:0:12}"
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+      - run: cargo fmt --check
+      - run: cargo test --locked --all-targets
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo run --locked --release -- output work
+      - name: Publish version 2 tables
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Delete old releases
-        if: steps.check.outputs.has_output == 'true' && steps.existing.outputs.exists == 'false'
+        shell: bash
         run: |
-          TAG="${{ steps.existing.outputs.tag }}"
-          for old_tag in $(gh release list --limit 50 --json tagName -q '.[].tagName'); do
-            if [ "$old_tag" != "$TAG" ]; then
-              echo "Deleting old release: $old_tag"
-              gh release delete "$old_tag" --yes --cleanup-tag
-            fi
-          done
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          set -euo pipefail
+          FP=$(cat output/fingerprint-v2.sha256)
+          TAG="names-v2-${FP:0:16}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "### Unchanged: $TAG" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          cat > output/release-notes.md <<EOF
+          Name-only hash tables from CommunityDragon, format version 2.
 
-      - name: Create GitHub Release
-        if: steps.check.outputs.has_output == 'true' && steps.existing.outputs.exists == 'false'
-        run: |
-          TAG="${{ steps.existing.outputs.tag }}"
-          COMBINED_MB=$(echo "scale=1; ${{ steps.check.outputs.combined_size }} / 1048576" | bc)
-          WAD_MB=$(echo "scale=1; ${{ steps.check.outputs.wad_size }} / 1048576" | bc)
-          BIN_MB=$(echo "scale=1; ${{ steps.check.outputs.bin_size }} / 1048576" | bc)
+          - lol-names-v2-combined.txt.zst: GAME, ENTRIES, HASHES, FIELDS, TYPES
+          - lol-names-v2-wad.txt.zst: GAME
+          - lol-names-v2-bin.txt.zst: ENTRIES, HASHES, FIELDS, TYPES
 
+          Decompress to UTF-8 text. Hashes are calculated by the reader; BIN universes stay separate.
+          These files are not LMDB databases. Version 2 is published as a prerelease during consumer migration, preserving the latest legacy LMDB release.
+
+          [File format](https://github.com/RitoShark/lmdb-hashes/blob/${GITHUB_SHA}/docs/file-format.md)
+          [Migration guide](https://github.com/RitoShark/lmdb-hashes/blob/${GITHUB_SHA}/docs/migration.md)
+
+          Source fingerprint: $FP
+          EOF
           gh release create "$TAG" \
-            output/lol-hashes-combined.zst \
-            output/lol-hashes-wad.zst \
-            output/lol-hashes-bin.zst \
-            --title "Hash DB ${TAG}" \
-            --notes "Auto-generated LMDB hash databases from CommunityDragon.
-
-          **3 variants:**
-          - \`lol-hashes-combined.zst\` — WAD + BIN hashes (${COMBINED_MB} MB)
-          - \`lol-hashes-wad.zst\` — WAD hashes only (${WAD_MB} MB)
-          - \`lol-hashes-bin.zst\` — BIN hashes only (${BIN_MB} MB)
-
-          **Key formats:**
-          - WAD: u64 xxhash64 (big-endian) → path string
-          - BIN: u32 FNV1a (big-endian) → name string
-
-          Fingerprint: ${{ steps.check.outputs.fingerprint }}
-          Source: https://github.com/CommunityDragon/Data/tree/master/hashes/lol" \
-            --latest
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Summary
-        if: always()
-        run: |
-          if [ "${{ steps.existing.outputs.exists }}" = "true" ]; then
-            echo "### Skipped — hashes unchanged" >> $GITHUB_STEP_SUMMARY
-          elif [ "${{ steps.check.outputs.has_output }}" = "true" ]; then
-            echo "### Published new release: ${{ steps.existing.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
-            echo "- Combined: ${{ steps.check.outputs.combined_size }} bytes" >> $GITHUB_STEP_SUMMARY
-            echo "- WAD-only: ${{ steps.check.outputs.wad_size }} bytes" >> $GITHUB_STEP_SUMMARY
-            echo "- BIN-only: ${{ steps.check.outputs.bin_size }} bytes" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "### No output produced" >> $GITHUB_STEP_SUMMARY
-          fi
+            output/lol-names-v2-combined.txt.zst \
+            output/lol-names-v2-wad.txt.zst \
+            output/lol-names-v2-bin.txt.zst \
+            output/fingerprint-v2.sha256 \
+            --target "$GITHUB_SHA" \
+            --title "Name tables $TAG" \
+            --notes-file output/release-notes.md \
+            --prerelease --latest=false
+          echo "### Published: $TAG" >> "$GITHUB_STEP_SUMMARY"

@@ -1,11 +1,11 @@
 [package]
 name = "lmdb-hash-builder"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
-heed = "0.20"
-reqwest = { version = "0.12", features = ["blocking", "stream"] }
+reqwest = { version = "0.12", features = ["blocking"] }
 sha2 = "0.10"
 zstd = "0.13"
 hex = "0.4"
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
